@@ -1,0 +1,21 @@
+name = "Tebex"
+description = "Tebex webstore integration with durable, deduplicated purchase delivery"
+version = "1.0.0"
+api = "6.0.0"
+main = 'Trix\Tebex\Tebex'
+src-namespace-prefix = 'Trix\Tebex'
+author = "Trix"
+website = "https://github.com/TrixNEW/Quark-Tebex"
+
+[extensions]
+curl = "*"
+pdo_sqlite = "*"
+igbinary = "*"
+
+[permissions."tebex.admin"]
+description = "Manage the Tebex integration"
+default = "op"
+
+[permissions."tebex.buy"]
+description = "Show the webstore link"
+default = true

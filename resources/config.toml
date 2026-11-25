@@ -1,0 +1,16 @@
+# Secret key of this server from creator.tebex.io > Game Servers. TEBEX_SECRET overrides it.
+secret = ""
+
+# Shown by /buy. {url} is the webstore address reported by Tebex.
+buy-message = "Support the server at {url}"
+
+# Purchase commands run per tick, the rest wait for the following ticks.
+commands-per-tick = 10
+
+# Permissions of the sender that runs purchase commands.
+sender-permissions = ["quark.group.operator"]
+
+# Delivery journal, relative to the plugin data folder. Servers on one host sharing a secret must share this file.
+database = "journal.sqlite"
+
+debug = false

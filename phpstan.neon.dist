@@ -1,0 +1,11 @@
+# Quark and its extension stubs come from a Quark checkout, ../Quark unless QUARK_DIR says otherwise.
+includes:
+    - tests/phpstan/quark.php
+
+parameters:
+    level: 9
+    phpVersion: 80400
+    paths:
+        - src
+    treatPhpDocTypesAsCertain: false
+    rememberPossiblyImpureFunctionValues: false
