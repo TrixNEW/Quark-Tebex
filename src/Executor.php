@@ -45,6 +45,7 @@ final class Executor{
 	/**
 	 * @param \Closure(QueuedCommand) : ?Player $player finds the online receiver of a command
 	 * @param \Closure(QueuedCommand, int, string) : void $report receives the outcome of every command
+	 * @param \Closure() : void $drained called after each tick's commands ran
 	 */
 	public function __construct(
 		private Plugin $plugin,
@@ -52,7 +53,8 @@ final class Executor{
 		private TebexSender $sender,
 		private int $perTick,
 		private \Closure $player,
-		private \Closure $report
+		private \Closure $report,
+		private \Closure $drained
 	){
 		$this->queue = new \SplQueue();
 	}
@@ -91,6 +93,7 @@ final class Executor{
 			[$outcome, $detail] = $this->run($command);
 			($this->report)($command, $outcome, $detail);
 		}
+		($this->drained)();
 		if($this->queue->isEmpty()){
 			$this->task?->cancel();
 			$this->task = null;

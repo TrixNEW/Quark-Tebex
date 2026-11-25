@@ -13,10 +13,9 @@ use Trix\Tebex\api\TebexException;
 use Trix\Tebex\event\TebexCommandQuarantinedEvent;
 use Trix\Tebex\journal\Journal;
 use Vow\Promise;
-use function array_keys;
-use function array_slice;
 use function count;
 use function ctype_digit;
+use function implode;
 use function intdiv;
 use function is_array;
 use function is_bool;
@@ -78,6 +77,8 @@ final class CommandQueue{
 	private int $timerAt = 0;
 	private int $sequence = 0;
 
+	/** @var list<int> executed this tick, recorded together */
+	private array $executed = [];
 	/** @var array<int, true> */
 	private array $acks = [];
 	private bool $acking = false;
@@ -101,7 +102,7 @@ final class CommandQueue{
 		$this->byXuid = $store->matchesByXuid() ?? throw new \InvalidArgumentException("Unsupported store type $store->gameType");
 		$this->timers = new \SplPriorityQueue();
 		$this->timers->setExtractFlags(\SplPriorityQueue::EXTR_DATA);
-		$this->executor = new Executor($plugin, $plugin->getServer()->getCommandMap(), $sender, $perTick, $this->receiver(...), $this->report(...));
+		$this->executor = new Executor($plugin, $plugin->getServer()->getCommandMap(), $sender, $perTick, $this->receiver(...), $this->report(...), $this->recordExecuted(...));
 	}
 
 	public function getStore() : Store{
@@ -142,6 +143,7 @@ final class CommandQueue{
 
 	public function close() : void{
 		$this->closed = true;
+		$this->recordExecuted();
 		foreach([$this->pollTimer, $this->timer, $this->ackTimer] as $handler){
 			$handler?->cancel();
 		}
@@ -181,20 +183,23 @@ final class CommandQueue{
 	}
 
 	/**
-	 * Checks the queue now unless a check is running or one finished moments ago.
-	 * Returns the seconds to wait, 0 if a check started.
+	 * Checks the queue now, or joins the check that is running. Resolves with the number of due players.
+	 * Rejects if a check finished moments ago, so manual refreshes cannot outpace next_check by much.
+	 *
+	 * @phpstan-return Promise<int>
 	 */
-	public function refresh() : int{
-		if($this->closed || $this->polling !== null){
-			return 0;
+	public function refresh() : Promise{
+		if($this->closed){
+			return Promise::rejected(new \RuntimeException("Tebex is shutting down"));
 		}
-		$wait = $this->lastPollAt + self::REFRESH_COOLDOWN - time();
-		if($wait > 0 && !$this->suspended){
-			return $wait;
+		if($this->polling === null){
+			$wait = $this->lastPollAt + self::REFRESH_COOLDOWN - time();
+			if($wait > 0 && !$this->suspended){
+				return Promise::rejected(new \RuntimeException("The queue was just checked, try again in {$wait}s"));
+			}
+			$this->suspended = false;
 		}
-		$this->suspended = false;
-		$this->poll();
-		return 0;
+		return $this->poll()->then(fn(int $_) : int => count($this->due));
 	}
 
 	/**
@@ -431,7 +436,8 @@ final class CommandQueue{
 		if($deferred === []){
 			return;
 		}
-		$now = time();
+		// Due times are whole seconds, rounded up so a delay never runs short.
+		$now = time() + 1;
 		$entries = [];
 		foreach($deferred as $command){
 			$entries[] = [$command->id, $now + $command->delay];
@@ -501,14 +507,15 @@ final class CommandQueue{
 	 * @param array<int, true> $blocked
 	 */
 	private function ready(QueuedCommand $command, array &$blocked) : void{
-		$reason = $command->payment !== null && isset($blocked[$command->payment]) ? "an earlier command of the purchase is waiting" : $this->executor->blocker($command, $this->receiver($command));
+		$player = $command->online ? $this->receiver($command) : null;
+		$reason = $command->payment !== null && isset($blocked[$command->payment]) ? "an earlier command of the purchase is waiting" : $this->executor->blocker($command, $player);
 		if($reason !== null){
 			unset($this->active[$command->id]);
 			if($command->payment !== null){
 				$blocked[$command->payment] = true;
 			}
 			$this->debug("Command #$command->id waits: $reason");
-			if($command->slots > 0 && ($player = $this->receiver($command)) !== null){
+			if($command->slots > 0 && $player !== null){
 				$player->sendMessage("Free up $command->slots inventory slots to receive your purchase.");
 			}
 			return;
@@ -560,15 +567,7 @@ final class CommandQueue{
 		switch($outcome){
 			case Executor::EXECUTED:
 				$this->plugin->getLogger()->info("Executed command #$id for $command->playerName: $detail");
-				$this->journal->mark([$id], Journal::EXECUTED)->then(function() use ($id) : void{
-					unset($this->active[$id]);
-					$this->states[$id] = Journal::EXECUTED;
-					$this->ack($id);
-				}, function(\Throwable $e) use ($id) : void{
-					unset($this->active[$id]);
-					$this->states[$id] = Journal::EXECUTING;
-					$this->plugin->getLogger()->error("Command #$id ran but could not be recorded ({$e->getMessage()}), it stays unacknowledged and will be quarantined on restart");
-				})->catch($this->logFailure("Could not record command #$id"));
+				$this->executed[] = $id;
 				return;
 			case Executor::BLOCKED:
 				$this->debug("Command #$id was not run: $detail");
@@ -586,6 +585,30 @@ final class CommandQueue{
 			default:
 				$this->quarantine($command, $detail);
 		}
+	}
+
+	/**
+	 * Records the commands that ran this tick in one journal write, they are acknowledged once it is durable.
+	 */
+	private function recordExecuted() : void{
+		if($this->executed === []){
+			return;
+		}
+		$ids = $this->executed;
+		$this->executed = [];
+		$this->journal->mark($ids, Journal::EXECUTED)->then(function() use ($ids) : void{
+			foreach($ids as $id){
+				unset($this->active[$id]);
+				$this->states[$id] = Journal::EXECUTED;
+				$this->ack($id);
+			}
+		}, function(\Throwable $e) use ($ids) : void{
+			foreach($ids as $id){
+				unset($this->active[$id]);
+				$this->states[$id] = Journal::EXECUTING;
+			}
+			$this->plugin->getLogger()->error("Commands #" . implode(", #", $ids) . " ran but could not be recorded ({$e->getMessage()}), they stay unacknowledged and will be quarantined on restart");
+		})->catch($this->logFailure("Could not record executed commands"));
 	}
 
 	private function release(QueuedCommand $command) : void{
@@ -616,7 +639,13 @@ final class CommandQueue{
 		if($this->acking || $this->acks === []){
 			return;
 		}
-		$ids = array_slice(array_keys($this->acks), 0, $this->ackChunk);
+		$ids = [];
+		foreach($this->acks as $id => $_){
+			$ids[] = $id;
+			if(count($ids) >= $this->ackChunk){
+				break;
+			}
+		}
 		$this->acking = true;
 		$this->api->request("DELETE", "/queue", ["ids" => $ids])->then(function() use ($ids) : void{
 			$this->acking = false;

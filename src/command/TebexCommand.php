@@ -91,8 +91,10 @@ final class TebexCommand extends Command implements PluginOwned{
 			$this->reply($sender, $this->plugin->connect() ? "Connecting to Tebex" : TextFormat::YELLOW . "Not connected, check the console");
 			return;
 		}
-		$wait = $queue->refresh();
-		$this->reply($sender, $wait === 0 ? "Checking the Tebex queue" : TextFormat::YELLOW . "The queue was just checked, try again in {$wait}s");
+		$queue->refresh()->then(
+			fn(int $due) => $this->reply($sender, TextFormat::GREEN . "Checked the Tebex queue, $due players have commands due"),
+			fn(\Throwable $e) => $this->reply($sender, TextFormat::YELLOW . $e->getMessage())
+		);
 	}
 
 	private function quarantine(CommandSender $sender) : void{
