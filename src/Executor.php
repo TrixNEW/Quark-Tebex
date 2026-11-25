@@ -157,6 +157,9 @@ final class Executor{
 			$this->plugin->getLogger()->logException($e);
 			return [self::QUARANTINED, "/$label threw " . $e::class . " while running"];
 		}
+		if($this->sender->wasRefused()){
+			return [self::REJECTED, "/$label refused the Tebex sender: " . implode(" ", $this->sender->takeOutput())];
+		}
 		$output = $this->sender->takeOutput();
 		if(TebexCommandExecutedEvent::hasHandlers()){
 			(new TebexCommandExecutedEvent($this->plugin, $command, $player, $line, $output))->call();
