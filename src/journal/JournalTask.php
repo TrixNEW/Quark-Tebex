@@ -22,6 +22,8 @@ final class JournalTask extends AsyncTask{
 
 	/** @var array<string, \PDO> */
 	private static array $connections = [];
+	/** @var array<string, int> */
+	private static array $prunedAt = [];
 
 	private string $ops;
 
@@ -94,6 +96,11 @@ final class JournalTask extends AsyncTask{
 		$results = [];
 		$db->exec("BEGIN IMMEDIATE");
 		try{
+			// Acknowledged commands are kept a while so late redeliveries are recognised, then dropped once a day.
+			if((self::$prunedAt[$scope] ?? 0) <= $now - 86400){
+				$db->prepare("DELETE FROM commands WHERE scope = ? AND state = ? AND updated < ?")->execute([$scope, Journal::ACKED, $now - 30 * 86400]);
+				self::$prunedAt[$scope] = $now;
+			}
 			foreach($ops as $op){
 				// Operations are built by Journal, their shapes match the handlers.
 				$results[] = match($op[0]){
@@ -123,14 +130,13 @@ final class JournalTask extends AsyncTask{
 
 	/**
 	 * Commands this server was executing when it stopped may or may not have run, so they are set aside for an admin.
+	 * So are those another owner left running for ten minutes, which covers a server whose address and so owner changed.
 	 *
 	 * @return list<array{int, int, int}> id, state and due time of every unacknowledged command
 	 */
 	private static function load(\PDO $db, string $scope, string $owner, int $now) : array{
-		$db->prepare("UPDATE commands SET state = ?, updated = ?, detail = 'interrupted while running: ' || detail WHERE scope = ? AND owner = ? AND state = ?")
-			->execute([Journal::QUARANTINED, $now, $scope, $owner, Journal::EXECUTING]);
-		$db->prepare("DELETE FROM commands WHERE scope = ? AND state = ? AND updated < ?")
-			->execute([$scope, Journal::ACKED, $now - 30 * 86400]);
+		$db->prepare("UPDATE commands SET state = ?, updated = ?, detail = 'interrupted while running: ' || detail WHERE scope = ? AND state = ? AND (owner = ? OR updated < ?)")
+			->execute([Journal::QUARANTINED, $now, $scope, Journal::EXECUTING, $owner, $now - 600]);
 		$select = $db->prepare("SELECT id, state, due FROM commands WHERE scope = ? AND state <> ? ORDER BY id");
 		$select->execute([$scope, Journal::ACKED]);
 		$rows = [];

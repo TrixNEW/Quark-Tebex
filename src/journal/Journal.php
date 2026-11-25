@@ -28,6 +28,7 @@ final class Journal{
 	/** @var list<Deferred<mixed>> */
 	private array $waiting = [];
 	private bool $writing = false;
+	private bool $closed = false;
 
 	public function __construct(
 		private AsyncPool $pool,
@@ -99,6 +100,13 @@ final class Journal{
 		return $this->submit(["list", self::QUARANTINED]);
 	}
 
+	/**
+	 * Refuses new writes. Writes already submitted still complete while the pool shuts down.
+	 */
+	public function close() : void{
+		$this->closed = true;
+	}
+
 	public function pending() : int{
 		return count($this->ops) + ($this->writing ? 1 : 0);
 	}
@@ -108,6 +116,9 @@ final class Journal{
 	 * @phpstan-return Promise<mixed>
 	 */
 	private function submit(array $op) : Promise{
+		if($this->closed){
+			return Promise::rejected(new \RuntimeException("Journal is closed"));
+		}
 		/** @phpstan-var Deferred<mixed> $deferred */
 		$deferred = new Deferred();
 		$this->ops[] = $op;
