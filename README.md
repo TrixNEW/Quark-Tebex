@@ -6,7 +6,7 @@ Delivers Tebex webstore purchases on Quark 6 servers. Purchases run once, are ne
 - Connections are kept alive. The plugin follows `next_check` and `Retry-After` and stays under the key's limit of 500 requests per 5 minutes.
 - Offline commands keep running when nobody is online. Online commands are fetched only for due players who are on this server.
 - Delays, inventory slot requirements and ordering within a purchase are respected. A delay survives restarts.
-- Refund, chargeback, expiry and subscription commands come through the same Tebex queue and are handled the same way.
+- Tebex runs expiry, renewal, refund and chargeback commands through the game server plugin. The Plugin API has a single command queue, so the plugin handles them exactly like purchase commands.
 
 Requires PHP 8.4 and Quark 6 with `curl`, `pdo_sqlite` and `igbinary`, all part of the standard Quark binaries.
 
@@ -54,7 +54,9 @@ Every command is recorded in a SQLite journal, scoped to the Tebex account and s
 
 A command that may have partly run is **quarantined**, not replayed. This covers a crash between steps 1 and 2, a command that threw an exception, and a command that was refused three times. `/tebex quarantine` lists them. `/tebex resolve <id> delivered` acknowledges one without running it. `/tebex resolve <id> retry` runs it again on the next check.
 
-A command that "ran" only means it returned without an error. Whether the reward arrived depends on the command, so check the logs or listen to `TebexCommandExecutedEvent` for anything critical.
+A command that "ran" only means it returned without an error. Whether the reward arrived depends on the command, so check the logs or listen to `TebexCommandExecutedEvent` for anything critical. A command that refuses the sender with Quark's standard permission or player-only reply counts as refused. A command with a custom permission message does not, so give the sender every permission its commands need.
+
+Purchase commands are run directly through the command map. `CommandEvent` and Quark's command log do not see them, use the Tebex events instead.
 
 Player names are checked before they are put into a command. Offline webstores accept any name at checkout, so a name that could escape its argument quarantines the command instead of running it. Names with spaces are quoted. The placeholders are `{name}`, `{player}` and `{username}` for the player name, and `{id}` and `{uuid}` for the XUID or Tebex player ID.
 
