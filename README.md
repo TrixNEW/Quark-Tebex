@@ -23,7 +23,7 @@ Use a **Minecraft (Bedrock)** webstore. Players are matched by XUID, which requi
 ```toml
 secret = ""                                 # TEBEX_SECRET overrides it
 buy-message = "Support the server at {url}" # shown by /buy
-commands-per-tick = 10                      # the rest wait for the following ticks
+commands-per-tick = 50                      # at most per tick, and at most 5ms of commands per tick
 sender-permissions = ["quark.group.operator"]
 database = "journal.sqlite"                 # relative to the plugin data folder
 debug = false
@@ -38,7 +38,7 @@ Purchase commands run as a dedicated `Tebex` sender that has only `sender-permis
 | `/buy`, `/store` | `tebex.buy` (everyone) | Shows the webstore address |
 | `/tebex info` | `tebex.admin` | Fetches the store details and checks the secret key |
 | `/tebex status` | `tebex.admin` | Shows the last and next queue check, errors and backlog |
-| `/tebex refresh` | `tebex.admin` | Checks the queue now. A check that finished in the last 10 seconds is not repeated |
+| `/tebex refresh` | `tebex.admin` | Checks the queue now, or 10 seconds after the last check, and reports the result |
 | `/tebex quarantine` | `tebex.admin` | Lists commands that need a decision |
 | `/tebex resolve <id> <delivered\|retry>` | `tebex.admin` | Settles a quarantined command |
 
@@ -48,7 +48,7 @@ Purchase commands run as a dedicated `Tebex` sender that has only `sender-permis
 
 Every command is recorded in a SQLite journal, scoped to the Tebex account and server:
 
-1. The command is **claimed** before it runs. A command that is already claimed, executed or acknowledged is never run again, even if Tebex sends it again. Commands are claimed only about one second ahead of running them, so a crash sets aside at most that many.
+1. The command is **claimed** before it runs. A command that is already claimed, executed or acknowledged is never run again, even if Tebex sends it again. Commands are claimed only about half a second ahead of running them, so a crash sets aside at most that many.
 2. It runs on the main thread. It is **recorded as executed** after the command returns without an error.
 3. It is **acknowledged** to Tebex in batches of up to 100. A failed acknowledgement is retried with backoff. It never runs the command again.
 

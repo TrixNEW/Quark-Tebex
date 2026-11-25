@@ -349,7 +349,7 @@ $took = microtime(true) - $started;
 $runs = preg_match_all('/\[Tebex\] BULK-(\d+)\b/', substr($server->output, $offset), $matches);
 check($runs === 1000 && count(array_unique($matches[1])) === 1000, "1000 commands ran exactly once ($runs runs)");
 check(count(array_intersect(range(10001, 11000), readState()["acked"])) === 1000, sprintf("all acknowledged in %.1fs across limited pages", $took));
-check($maxRunning > 0 && $maxRunning <= 250, "claimed but unrecorded commands stay near one second of execution (peak $maxRunning)");
+check($maxRunning > 0 && $maxRunning <= 600, "claimed but unrecorded commands stay near half a second of execution (peak $maxRunning)");
 $bulkDeletes = array_filter(requests("DELETE", "/queue"), fn(array $r) : bool => $r["t"] >= $started);
 check(max(array_map(fn(array $r) : int => count(deletedIds($r)), $bulkDeletes)) <= 100, count($bulkDeletes) . " acknowledgement requests of at most 100 ids");
 
