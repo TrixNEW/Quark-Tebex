@@ -13,6 +13,7 @@ use Trix\Tebex\api\TebexException;
 use Trix\Tebex\event\TebexCommandQuarantinedEvent;
 use Trix\Tebex\journal\Journal;
 use Vow\Promise;
+use function array_splice;
 use function count;
 use function ctype_digit;
 use function implode;
@@ -62,14 +63,16 @@ final class CommandQueue{
 
 	/** @var array<int, QueuedCommand> commands between being offered and being recorded */
 	private array $active = [];
-	/** @var array<int, int> journal state of commands that must not run again */
+	/** @var array<int, int> journal state of commands that must not run yet: executed, quarantined or run elsewhere */
 	private array $states = [];
 	/** @var array<int, int> */
 	private array $dueAt = [];
 	/** @var array<int, int> */
 	private array $rejections = [];
-	/** @var list<QueuedCommand> */
+	/** @var list<QueuedCommand> ready commands in order, claimed only as fast as they run */
 	private array $toClaim = [];
+	private int $claiming = 0;
+	private int $claimWindow;
 	/** @var \SplPriorityQueue<array{int, int}, array{QueuedCommand, int}> */
 	private \SplPriorityQueue $timers;
 	/** @phpstan-var TaskHandler<ClosureTask>|null */
@@ -100,9 +103,11 @@ final class CommandQueue{
 		private bool $debug
 	){
 		$this->byXuid = $store->matchesByXuid() ?? throw new \InvalidArgumentException("Unsupported store type $store->gameType");
+		// A crash quarantines claimed commands that did not run yet, so only about a second of them is claimed ahead.
+		$this->claimWindow = $perTick * Server::TARGET_TICKS_PER_SECOND;
 		$this->timers = new \SplPriorityQueue();
 		$this->timers->setExtractFlags(\SplPriorityQueue::EXTR_DATA);
-		$this->executor = new Executor($plugin, $plugin->getServer()->getCommandMap(), $sender, $perTick, $this->receiver(...), $this->report(...), $this->recordExecuted(...));
+		$this->executor = new Executor($plugin, $plugin->getServer()->getCommandMap(), $sender, $perTick, $this->receiver(...), $this->report(...), $this->drained(...));
 	}
 
 	public function getStore() : Store{
@@ -296,6 +301,9 @@ final class CommandQueue{
 			$this->lastPollAt = time();
 			$this->debug("Checked the queue, " . count($this->due) . " due players, next check in {$next}s");
 			$this->schedulePoll(max(10, min(3600, $next)));
+			if($this->acks !== [] && !$this->acking && $this->ackTimer === null){
+				$this->flushAcks();
+			}
 		}, function(\Throwable $e) : void{
 			$this->polling = null;
 			$this->lastPollAt = time();
@@ -336,12 +344,17 @@ final class CommandQueue{
 	 */
 	private function setDue(array $players) : void{
 		$this->due = [];
+		$fetchedAt = [];
 		foreach($players as $player){
+			if(isset($this->onlineFetchedAt[$player["id"]])){
+				$fetchedAt[$player["id"]] = $this->onlineFetchedAt[$player["id"]];
+			}
 			$key = $this->byXuid ? (ctype_digit($player["uuid"]) ? $player["uuid"] : null) : strtolower($player["name"]);
 			if($key !== null){
 				$this->due[$key] = $player;
 			}
 		}
+		$this->onlineFetchedAt = $fetchedAt;
 		// Players who left are skipped entirely, an empty server only keeps offline commands moving.
 		foreach($this->online as $key => $_){
 			if(isset($this->due[$key])){
@@ -355,7 +368,7 @@ final class CommandQueue{
 	 */
 	private function fetchOnline(array $player) : void{
 		$now = time();
-		if($this->closed || ($this->onlineFetchedAt[$player["id"]] ?? 0) > $now - self::ONLINE_COOLDOWN){
+		if($this->closed || $this->suspended || ($this->onlineFetchedAt[$player["id"]] ?? 0) > $now - self::ONLINE_COOLDOWN){
 			return;
 		}
 		$this->onlineFetchedAt[$player["id"]] = $now;
@@ -365,7 +378,7 @@ final class CommandQueue{
 	}
 
 	private function fetchOffline() : void{
-		if($this->closed || $this->fetchingOffline){
+		if($this->closed || $this->suspended || $this->fetchingOffline){
 			return;
 		}
 		$this->fetchingOffline = true;
@@ -524,17 +537,19 @@ final class CommandQueue{
 	}
 
 	private function flushClaims() : void{
-		if($this->toClaim === []){
+		$room = $this->claimWindow - $this->claiming - $this->executor->queued();
+		if($this->toClaim === [] || $room <= 0 || $this->closed){
 			return;
 		}
 		$batch = [];
 		$entries = [];
-		foreach($this->toClaim as $command){
+		foreach(array_splice($this->toClaim, 0, $room) as $command){
 			$batch[$command->id] = $command;
 			$entries[] = [$command->id, self::describe($command)];
 		}
-		$this->toClaim = [];
+		$this->claiming += count($batch);
 		$this->journal->claim($entries)->then(function(array $result) use ($batch) : void{
+			$this->claiming -= count($batch);
 			[$claimed, $others] = $result;
 			$unrun = [];
 			foreach($claimed as $id){
@@ -554,7 +569,9 @@ final class CommandQueue{
 			if($unrun !== []){
 				$this->journal->release($unrun)->catch($this->logFailure("Could not return unrun commands to the queue"));
 			}
+			$this->flushClaims();
 		}, function(\Throwable $e) use ($batch) : void{
+			$this->claiming -= count($batch);
 			foreach($batch as $id => $_){
 				unset($this->active[$id]);
 			}
@@ -587,6 +604,11 @@ final class CommandQueue{
 		}
 	}
 
+	private function drained() : void{
+		$this->recordExecuted();
+		$this->flushClaims();
+	}
+
 	/**
 	 * Records the commands that ran this tick in one journal write, they are acknowledged once it is durable.
 	 */
@@ -598,7 +620,7 @@ final class CommandQueue{
 		$this->executed = [];
 		$this->journal->mark($ids, Journal::EXECUTED)->then(function() use ($ids) : void{
 			foreach($ids as $id){
-				unset($this->active[$id]);
+				unset($this->active[$id], $this->dueAt[$id], $this->rejections[$id]);
 				$this->states[$id] = Journal::EXECUTED;
 				$this->ack($id);
 			}
@@ -617,7 +639,7 @@ final class CommandQueue{
 	}
 
 	private function quarantine(QueuedCommand $command, string $reason) : void{
-		unset($this->active[$command->id]);
+		unset($this->active[$command->id], $this->dueAt[$command->id], $this->rejections[$command->id]);
 		$this->states[$command->id] = Journal::QUARANTINED;
 		$this->plugin->getLogger()->warning("Quarantined command #$command->id for $command->playerName: $reason");
 		$this->journal->mark([$command->id], Journal::QUARANTINED, self::describe($command) . " ($reason)")
@@ -685,9 +707,9 @@ final class CommandQueue{
 	 * @param list<int> $ids
 	 */
 	private function acknowledged(array $ids) : void{
+		// The journal still knows them, a redelivery is recognised when it is claimed.
 		foreach($ids as $id){
-			unset($this->acks[$id]);
-			$this->states[$id] = Journal::ACKED;
+			unset($this->acks[$id], $this->states[$id]);
 		}
 		$this->journal->mark($ids, Journal::ACKED)->catch($this->logFailure("Could not record acknowledgements"));
 	}
@@ -728,7 +750,9 @@ final class CommandQueue{
 	 */
 	private function logFailure(string $context) : \Closure{
 		return function(\Throwable $e) use ($context) : void{
-			if($e instanceof TebexException || $e instanceof \RuntimeException){
+			if($this->closed && $e instanceof \RuntimeException){
+				$this->debug("$context during shutdown: {$e->getMessage()}");
+			}elseif($e instanceof \RuntimeException){
 				$this->plugin->getLogger()->warning("$context: {$e->getMessage()}");
 			}else{
 				$this->plugin->getLogger()->logException($e);

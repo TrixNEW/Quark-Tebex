@@ -90,8 +90,12 @@ final class Executor{
 	public function drain() : void{
 		for($i = 0; $i < $this->perTick && !$this->queue->isEmpty(); ++$i){
 			$command = $this->queue->dequeue();
-			[$outcome, $detail] = $this->run($command);
+			[$outcome, $detail, $player, $output] = $this->run($command);
 			($this->report)($command, $outcome, $detail);
+			// Called after the outcome is reported, so a failing listener cannot leave a run command unrecorded.
+			if($outcome === self::EXECUTED && TebexCommandExecutedEvent::hasHandlers()){
+				(new TebexCommandExecutedEvent($this->plugin, $command, $player, $detail, $output))->call();
+			}
 		}
 		($this->drained)();
 		if($this->queue->isEmpty()){
@@ -116,22 +120,22 @@ final class Executor{
 	}
 
 	/**
-	 * @return array{int, string}
+	 * @return array{int, string, ?Player, list<string>} outcome, command line or reason, receiver and replies
 	 */
 	private function run(QueuedCommand $command) : array{
 		$player = $command->online ? ($this->player)($command) : null;
 		if(($blocker = $this->blocker($command, $player)) !== null){
-			return [self::BLOCKED, $blocker];
+			return [self::BLOCKED, $blocker, null, []];
 		}
 		$line = self::render($command->command, $player?->getName() ?? $command->playerName, $command->playerUuid);
 		if($line === null){
-			return [self::QUARANTINED, "unsafe command or placeholder value"];
+			return [self::QUARANTINED, "unsafe command or placeholder value", null, []];
 		}
 		if(TebexCommandExecuteEvent::hasHandlers()){
 			$event = new TebexCommandExecuteEvent($this->plugin, $command, $player, $line);
 			$event->call();
 			if($event->isCancelled()){
-				return [self::BLOCKED, "cancelled by a plugin"];
+				return [self::BLOCKED, "cancelled by a plugin", null, []];
 			}
 			$line = $event->getCommandLine();
 		}
@@ -140,13 +144,13 @@ final class Executor{
 		$label = array_shift($args) ?? "";
 		$target = $this->commandMap->getCommand($label);
 		if($target === null){
-			return [self::REJECTED, "unknown command /$label"];
+			return [self::REJECTED, "unknown command /$label", null, []];
 		}
 		if($target instanceof PluginOwned && !$target->getOwningPlugin()->isEnabled()){
-			return [self::REJECTED, "/$label belongs to a disabled plugin"];
+			return [self::REJECTED, "/$label belongs to a disabled plugin", null, []];
 		}
 		if(!$target->testPermissionSilent($this->sender)){
-			return [self::REJECTED, "the Tebex sender may not use /$label"];
+			return [self::REJECTED, "the Tebex sender may not use /$label", null, []];
 		}
 
 		$this->sender->takeOutput();
@@ -154,20 +158,16 @@ final class Executor{
 			$target->dispatchLine($this->sender, $label, $args, $line);
 		}catch(CommandInputException | InvalidCommandSyntaxException){
 			$output = $this->sender->takeOutput();
-			return [self::REJECTED, "invalid usage of /$label" . ($output === [] ? "" : ": " . implode(" ", $output))];
+			return [self::REJECTED, "invalid usage of /$label" . ($output === [] ? "" : ": " . implode(" ", $output)), null, []];
 		}catch(\Throwable $e){
 			$this->sender->takeOutput();
 			$this->plugin->getLogger()->logException($e);
-			return [self::QUARANTINED, "/$label threw " . $e::class . " while running"];
+			return [self::QUARANTINED, "/$label threw " . $e::class . " while running", null, []];
 		}
 		if($this->sender->wasRefused()){
-			return [self::REJECTED, "/$label refused the Tebex sender: " . implode(" ", $this->sender->takeOutput())];
+			return [self::REJECTED, "/$label refused the Tebex sender: " . implode(" ", $this->sender->takeOutput()), null, []];
 		}
-		$output = $this->sender->takeOutput();
-		if(TebexCommandExecutedEvent::hasHandlers()){
-			(new TebexCommandExecutedEvent($this->plugin, $command, $player, $line, $output))->call();
-		}
-		return [self::EXECUTED, $line];
+		return [self::EXECUTED, $line, $player, $this->sender->takeOutput()];
 	}
 
 	/**

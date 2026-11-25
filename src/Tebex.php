@@ -32,6 +32,7 @@ final class Tebex extends PluginBase implements Listener{
 	private ?AsyncPool $pool = null;
 	private ?TebexApi $api = null;
 	private ?CommandQueue $queue = null;
+	private ?Journal $journal = null;
 	/** @phpstan-var TaskHandler<ClosureTask>|null */
 	private ?TaskHandler $retry = null;
 	private bool $connecting = false;
@@ -67,7 +68,9 @@ final class Tebex extends PluginBase implements Listener{
 		$this->queue?->close();
 		$this->api?->close();
 		$this->pool?->shutdown();
-		$this->queue = $this->api = $this->pool = null;
+		// Writes made while the pool shut down were completed by it, anything later has no worker to run on.
+		$this->journal?->close();
+		$this->queue = $this->api = $this->pool = $this->journal = null;
 	}
 
 	/**
@@ -117,11 +120,14 @@ final class Tebex extends PluginBase implements Listener{
 				$this->getLogger()->error("Webstore game type \"$store->gameType\" is not supported, use a \"" . Store::BEDROCK . "\" or \"" . Store::OFFLINE . "\" webstore");
 				return;
 			}
-			if($byXuid && !$this->getServer()->getOnlineMode()){
-				$this->getLogger()->warning("This webstore identifies players by XUID but xbox-auth is off, online commands only reach players signed in to Xbox Live");
+			if(!$this->getServer()->getOnlineMode()){
+				$this->getLogger()->warning($byXuid ?
+					"This webstore identifies players by XUID but xbox-auth is off, online commands only reach players signed in to Xbox Live" :
+					"This webstore identifies players by username and xbox-auth is off, anyone joining with a buyer's name receives their online commands"
+				);
 			}
 			$owner = $this->getServer()->getServerUniqueId()->toString();
-			$journal = new Journal($this->pool ?? throw new \LogicException("Plugin is disabled"), self::JOURNAL_WORKER, $this->settings->database, $store->scope(), $owner);
+			$this->journal = $journal = new Journal($this->pool ?? throw new \LogicException("Plugin is disabled"), self::JOURNAL_WORKER, $this->settings->database, $store->scope(), $owner);
 			$sender = new TebexSender($this->getServer(), $this->settings->senderPermissionMap());
 			$this->queue = $queue = new CommandQueue($this, $this->api ?? throw new \LogicException("Plugin is disabled"), $journal, $store, $sender, $this->settings->commandsPerTick, $this->settings->debug);
 			$queue->start()->then(function() use ($store) : void{
