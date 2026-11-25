@@ -189,20 +189,6 @@ function executed(Process $server, string $marker) : int{
 	return $server->count("/\\[Tebex\\] " . preg_quote($marker, "/") . "\\b/");
 }
 
-/** CPU seconds and resident memory of a process from /proc. */
-function usage(int $pid) : array{
-	$stat = explode(" ", (string) file_get_contents("/proc/$pid/stat"));
-	preg_match('/VmRSS:\s+(\d+)/', (string) file_get_contents("/proc/$pid/status"), $rss);
-	return [((int) $stat[13] + (int) $stat[14]) / 100, (int) $rss[1]];
-}
-
-/** The PHP server process, which may be a child of the shell proc_open started. */
-function serverPid(Process $server) : int{
-	$pid = $server->pid();
-	$children = trim((string) @file_get_contents("/proc/$pid/task/$pid/children"));
-	return $children === "" ? $pid : (int) explode(" ", $children)[0];
-}
-
 @mkdir("$work/plugins", 0777, true);
 register_shutdown_function(static function() use ($work) : void{
 	global $failed;
@@ -239,6 +225,7 @@ file_put_contents("$work/fake.json", json_encode([
 		offline(103, "say TBX-103", delay: 4),
 		offline(104, "notacommand {name}"),
 		offline(105, "say TBX-105 {name}", name: "bad\" op x"),
+		offline(106, "kill"),
 	],
 	"offline_limit" => 250,
 	"sticky" => true,
@@ -263,6 +250,7 @@ check($server->waitFor('/Quarantined command #104/', 50), "unknown command is qu
 check($server->count('/Command #104 was refused/') === 2, "unknown command was tried three times");
 check(executed($server, "TBX-101") === 1 && executed($server, "TBX-102") === 1 && executed($server, "TBX-103") === 1, "every command ran exactly once despite duplicate deliveries");
 check($server->count('/TBX-102 for Notch/') >= 1, "placeholders are filled in");
+check($server->waitFor('/Quarantined command #106 for Notch: \/kill refused the Tebex sender/', 5) && !in_array(106, readState()["acked"], true), "player-only command is refused, not recorded as executed");
 check($server->count('/Quarantined command #105/') === 1 && executed($server, "TBX-105") === 0, "unsafe player name is quarantined without running");
 check($ran103 - $firstSeen >= 3.9, sprintf("delay is respected (%.1fs)", $ran103 - $firstSeen));
 $deletes = requests("DELETE", "/queue");
@@ -412,7 +400,7 @@ state(function(array $s) : array{
 	return $s;
 });
 $server = startServer();
-check($server->waitFor('/1 purchase command needs review/', 60), "interrupted command is reported on boot");
+check($server->waitFor('/3 purchase commands need review/', 60), "interrupted command is reported on boot");
 $server->waitFor('/(?!)/', 12);
 check(executed($server, "TBX-400") === 0 && !in_array(400, readState()["acked"], true), "interrupted command is neither rerun nor acknowledged");
 check(journalState(400) === 4, "interrupted command is quarantined");
@@ -433,28 +421,6 @@ $server->waitFor('/(?!)/', 15);
 check(executed($server, "TBX-500") === 0, "killed command is not rerun (journal state " . var_export($stateAfterKill, true) . ")");
 check(in_array(journalState(500), [2, 3, 4], true), "killed command ends up recorded or quarantined");
 
-step("Idle usage");
-state(function(array $s) : array{
-	$s["offline"] = [];
-	return $s;
-});
-$pid = serverPid($server);
-$server->waitFor('/(?!)/', 5);
-[$cpu0] = usage($pid);
-$server->waitFor('/(?!)/', 60);
-[$cpu1, $rss] = usage($pid);
-echo sprintf("  idle with the plugin: %.2f%% CPU over 60s, %d MB resident\n", ($cpu1 - $cpu0) / 60 * 100, intdiv($rss, 1024));
-$server->stop();
-
-unlink("$work/plugins/Tebex.phar");
-$server = startServer();
-$server->waitFor('/Done \(/', 60);
-$pid = serverPid($server);
-$server->waitFor('/(?!)/', 5);
-[$cpu0] = usage($pid);
-$server->waitFor('/(?!)/', 60);
-[$cpu1, $rss] = usage($pid);
-echo sprintf("  idle without the plugin: %.2f%% CPU over 60s, %d MB resident\n", ($cpu1 - $cpu0) / 60 * 100, intdiv($rss, 1024));
 $server->stop();
 $api->kill();
 exit($failed === 0 ? 0 : 1);
