@@ -4,8 +4,8 @@ secret = ""
 # Shown by /buy. {url} is the webstore address reported by Tebex.
 buy-message = "Support the server at {url}"
 
-# Purchase commands run per tick, the rest wait for the following ticks.
-commands-per-tick = 10
+# Most purchase commands run per tick. A tick also stops after 5ms of commands, the rest wait for the next ticks.
+commands-per-tick = 50
 
 # Permissions of the sender that runs purchase commands.
 sender-permissions = ["quark.group.operator"]

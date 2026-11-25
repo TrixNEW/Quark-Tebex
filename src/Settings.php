@@ -44,7 +44,7 @@ final readonly class Settings{
 		$secret = getenv("TEBEX_SECRET");
 		$secret = is_string($secret) && trim($secret) !== "" ? trim($secret) : self::string($config, "secret", "");
 
-		$perTick = $config["commands-per-tick"] ?? 10;
+		$perTick = $config["commands-per-tick"] ?? 50;
 		if(!is_int($perTick) || $perTick < 1 || $perTick > 1000){
 			throw new \InvalidArgumentException("commands-per-tick must be between 1 and 1000");
 		}

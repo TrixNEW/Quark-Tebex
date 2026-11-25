@@ -16,6 +16,7 @@ use quark\scheduler\TaskHandler;
 use Trix\Tebex\event\TebexCommandExecutedEvent;
 use Trix\Tebex\event\TebexCommandExecuteEvent;
 use function array_shift;
+use function hrtime;
 use function count;
 use function implode;
 use function ltrim;
@@ -26,9 +27,12 @@ use function strlen;
 use function trim;
 
 /**
- * Runs claimed commands through the Tebex sender, a limited number per tick.
+ * Runs claimed commands through the Tebex sender. Each tick runs up to a number of commands and stops early once
+ * they took a few milliseconds, so heavy commands cannot drop TPS while cheap ones still clear a backlog fast.
  */
 final class Executor{
+	private const int TICK_BUDGET_NS = 5_000_000;
+
 	public const int EXECUTED = 0;
 	/** Conditions are not met right now, the command may run later. */
 	public const int BLOCKED = 1;
@@ -88,7 +92,8 @@ final class Executor{
 	}
 
 	public function drain() : void{
-		for($i = 0; $i < $this->perTick && !$this->queue->isEmpty(); ++$i){
+		$deadline = hrtime(true) + self::TICK_BUDGET_NS;
+		for($i = 0; $i < $this->perTick && !$this->queue->isEmpty() && ($i === 0 || hrtime(true) < $deadline); ++$i){
 			$command = $this->queue->dequeue();
 			[$outcome, $detail, $player, $output] = $this->run($command);
 			($this->report)($command, $outcome, $detail);
