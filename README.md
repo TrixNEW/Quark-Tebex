@@ -16,7 +16,7 @@ Requires PHP 8.4 and Quark 6 with `curl`, `pdo_sqlite` and `igbinary`, all part 
 2. Start the server once, then set `secret` in the plugin's `config.toml`, or set the `TEBEX_SECRET` environment variable. The secret key is under creator.tebex.io > Game Servers.
 3. Restart the server and run `/tebex info` to check the connection.
 
-Use a **Minecraft (Bedrock)** webstore. Players are matched by XUID, which requires `xbox-auth`. **Minecraft (Offline/Geyser)** webstores match players by username instead. Java webstores are refused because their player IDs cannot match Bedrock players.
+Use a **Minecraft (Bedrock)** webstore. Players are matched by XUID, which requires `xbox-auth`. **Minecraft (Offline/Geyser)** webstores match players by username instead. Only use one where names are verified, by `xbox-auth` or an authenticating proxy, or anyone can claim a buyer's online commands by joining with their name. Java webstores are refused because their player IDs cannot match Bedrock players.
 
 ## Configuration
 
@@ -48,7 +48,7 @@ Purchase commands run as a dedicated `Tebex` sender that has only `sender-permis
 
 Every command is recorded in a SQLite journal, scoped to the Tebex account and server:
 
-1. The command is **claimed** before it runs. A command that is already claimed, executed or acknowledged is never run again, even if Tebex sends it again.
+1. The command is **claimed** before it runs. A command that is already claimed, executed or acknowledged is never run again, even if Tebex sends it again. Commands are claimed only about one second ahead of running them, so a crash sets aside at most that many.
 2. It runs on the main thread. It is **recorded as executed** after the command returns without an error.
 3. It is **acknowledged** to Tebex in batches of up to 100. A failed acknowledgement is retried with backoff. It never runs the command again.
 
