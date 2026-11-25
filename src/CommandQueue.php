@@ -12,6 +12,7 @@ use Trix\Tebex\api\TebexApi;
 use Trix\Tebex\api\TebexException;
 use Trix\Tebex\event\TebexCommandQuarantinedEvent;
 use Trix\Tebex\journal\Journal;
+use Vow\Deferred;
 use Vow\Promise;
 use function array_splice;
 use function count;
@@ -51,6 +52,8 @@ final class CommandQueue{
 	private int $lastPollAt = 0;
 	private int $failures = 0;
 	private ?string $lastError = null;
+	/** @var list<Deferred<int>> refreshes waiting for the next check */
+	private array $refreshes = [];
 
 	/** @var array<int|string, array{id: int, name: string, uuid: string}> player key => due player */
 	private array $due = [];
@@ -103,8 +106,8 @@ final class CommandQueue{
 		private bool $debug
 	){
 		$this->byXuid = $store->matchesByXuid() ?? throw new \InvalidArgumentException("Unsupported store type $store->gameType");
-		// A crash quarantines claimed commands that did not run yet, so only about a second of them is claimed ahead.
-		$this->claimWindow = $perTick * Server::TARGET_TICKS_PER_SECOND;
+		// A crash quarantines claimed commands that did not run yet, so only about half a second of them is claimed ahead.
+		$this->claimWindow = $perTick * intdiv(Server::TARGET_TICKS_PER_SECOND, 2);
 		$this->timers = new \SplPriorityQueue();
 		$this->timers->setExtractFlags(\SplPriorityQueue::EXTR_DATA);
 		$this->executor = new Executor($plugin, $plugin->getServer()->getCommandMap(), $sender, $perTick, $this->receiver(...), $this->report(...), $this->drained(...));
@@ -148,6 +151,9 @@ final class CommandQueue{
 
 	public function close() : void{
 		$this->closed = true;
+		foreach(array_splice($this->refreshes, 0) as $refresh){
+			$refresh->reject(new \RuntimeException("Tebex is shutting down"));
+		}
 		$this->recordExecuted();
 		foreach([$this->pollTimer, $this->timer, $this->ackTimer] as $handler){
 			$handler?->cancel();
@@ -188,8 +194,8 @@ final class CommandQueue{
 	}
 
 	/**
-	 * Checks the queue now, or joins the check that is running. Resolves with the number of due players.
-	 * Rejects if a check finished moments ago, so manual refreshes cannot outpace next_check by much.
+	 * Checks the queue now, joins the check that is running, or right after one finished, waits a few seconds so
+	 * manual refreshes cannot outpace next_check by much. Resolves with the number of due players.
 	 *
 	 * @phpstan-return Promise<int>
 	 */
@@ -197,12 +203,18 @@ final class CommandQueue{
 		if($this->closed){
 			return Promise::rejected(new \RuntimeException("Tebex is shutting down"));
 		}
+		$this->suspended = false;
 		if($this->polling === null){
 			$wait = $this->lastPollAt + self::REFRESH_COOLDOWN - time();
-			if($wait > 0 && !$this->suspended){
-				return Promise::rejected(new \RuntimeException("The queue was just checked, try again in {$wait}s"));
+			if($wait > 0){
+				if($this->pollTimer === null || $this->nextPollAt > time() + $wait){
+					$this->schedulePoll($wait);
+				}
+				/** @phpstan-var Deferred<int> $deferred */
+				$deferred = new Deferred();
+				$this->refreshes[] = $deferred;
+				return $deferred->promise;
 			}
-			$this->suspended = false;
 		}
 		return $this->poll()->then(fn(int $_) : int => count($this->due));
 	}
@@ -296,6 +308,9 @@ final class CommandQueue{
 		$this->polling = $promise;
 		$promise->then(function(int $next) : void{
 			$this->polling = null;
+			foreach(array_splice($this->refreshes, 0) as $refresh){
+				$refresh->resolve(count($this->due));
+			}
 			$this->failures = 0;
 			$this->lastError = null;
 			$this->lastPollAt = time();
@@ -306,6 +321,9 @@ final class CommandQueue{
 			}
 		}, function(\Throwable $e) : void{
 			$this->polling = null;
+			foreach(array_splice($this->refreshes, 0) as $refresh){
+				$refresh->reject($e);
+			}
 			$this->lastPollAt = time();
 			$this->failures++;
 			$this->lastError = $e->getMessage();
