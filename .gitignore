@@ -1,3 +1,6 @@
 vendor/
 build/
 composer.lock
+.code-review-graph/
+.claude/
+.mcp.json

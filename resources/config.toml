@@ -4,7 +4,7 @@ secret = ""
 # Shown by /buy. {url} is the webstore address reported by Tebex.
 buy-message = "Support the server at {url}"
 
-# Most purchase commands run per tick. A tick also stops after 5ms of commands, the rest wait for the next ticks.
+# Maximum commands per tick, subject to a 5 ms execution budget.
 commands-per-tick = 50
 
 # Permissions of the sender that runs purchase commands.
@@ -12,5 +12,3 @@ sender-permissions = ["quark.group.operator"]
 
 # Delivery journal, relative to the plugin data folder. Servers on one host sharing a secret must share this file.
 database = "journal.sqlite"
-
-debug = false

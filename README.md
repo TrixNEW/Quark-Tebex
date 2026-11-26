@@ -34,10 +34,10 @@ buy-message = "Support the server at {url}"
 commands-per-tick = 50
 sender-permissions = ["quark.group.operator"]
 database = "journal.sqlite"
-debug = false
 ```
 
 The `TEBEX_SECRET` environment variable overrides `secret`. Command execution uses a 5 ms per-tick budget.
+Set Quark's `[logging]` console or file level to `debug` in `config/server.toml` for detailed Tebex diagnostics.
 
 ## Commands
 
@@ -78,7 +78,9 @@ Results compare complete plugin and server combinations, not isolated plugin per
 
 Commands are durably journaled before execution and acknowledged only after execution completes. Failed acknowledgements are retried without replaying completed commands.
 
-Commands with uncertain execution states are quarantined for manual resolution rather than automatically replayed.
+Within a fetched purchase, later commands can wait for another queue check when an earlier command is delayed or refused.
+
+Commands with uncertain execution states are quarantined for manual resolution. Use the command IDs from `/tebex quarantine` to investigate the original purchases before resolving them.
 
 Each server should use its own Tebex secret. Servers sharing a secret on the same host must share a journal database.
 
@@ -91,6 +93,8 @@ Provides a rate-limited asynchronous Tebex API client through `Tebex::getApi()` 
 - `TebexCommandQuarantinedEvent`
 
 ## Development
+
+Use Quark's PHP runtime for the tests and PHPStan.
 
 ```sh
 composer install
